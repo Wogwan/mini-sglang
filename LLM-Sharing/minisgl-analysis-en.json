@@ -1,0 +1,97 @@
+{
+  "slides": [
+    {
+      "id": 1,
+      "title": "Deep Dive into mini-sglang: Building a High-Performance Inference Engine",
+      "subtitle": "Understanding AI Infrastructure through a Minimalist & Optimized Implementation",
+      "bullets": [
+        "Core Objective: Learning LLM Inference Engines by studying a compact, performant codebase",
+        "Stack: PyTorch + Custom CUDA Kernels + Radix KV Cache Manager",
+        "Key Features: Paged Attention, CUDA Graphs, Overlap Scheduling, Tensor Parallelism",
+        "Philosophy: Systems engineering meets Deep Learning - efficiency through memory & compute optimization"
+      ],
+      "speaker_notes": "Welcome to this deep dive into mini-sglang. While production engines like vLLM or the full SGLang can be overwhelming with thousands of files, mini-sglang provides a 'distilled' version of these high-performance systems. We'll explore how modern inference engines handle the KV cache, manage GPU memory, and hide latency through clever scheduling."
+    },
+    {
+      "id": 2,
+      "title": "System Architecture: Scheduler vs. Engine",
+      "bullets": [
+        "Scheduler (Control Plane): Handles API requests, tokenization, batching policy, and prefix matching",
+        "Engine (Data Plane): Manages model weights, KV cache allocation, and GPU execution (Forward Pass)",
+        "Separation of Concerns: Decoupling request management from the high-frequency GPU execution loop",
+        "Communication: Async message passing between Frontend/Backend to maximize throughput"
+      ],
+      "speaker_notes": "The architecture is split into two main layers. The Scheduler (found in python/minisgl/scheduler/scheduler.py) acts as the brain, deciding which requests to run next. The Engine (python/minisgl/engine/engine.py) is the muscle, owning the GPU memory and the actual model. This split allows us to optimize each layer independently.",
+      "visual_hint": "Architecture: [User Request] -> [Scheduler (Prefill/Decode Managers)] -> [Engine (CUDA Graph/Model)] -> [GPU]"
+    },
+    {
+      "id": 3,
+      "title": "The Magic of Prefix Caching: RadixTree",
+      "bullets": [
+        "Problem: Re-computing KV caches for shared system prompts or many-shot examples is wasteful",
+        "Solution: RadixTree-based KV Cache Manager (python/minisgl/kvcache/radix_manager.py)",
+        "Mechanism: Store KV caches as nodes in a tree indexed by token sequences",
+        "Efficiency: Automatic prefix matching (O(match_len)) and LRU-based eviction"
+      ],
+      "code_snippet": "class RadixTreeNode:\n    def __init__(self, tic: int | None = None) -> None:\n        self.children: Dict[int, RadixTreeNode] = {}\n        self.ref_count: int = 0\n        self._key: torch.Tensor  # Token sequence\n        self._value: torch.Tensor # KV Indices",
+      "speaker_notes": "One of SGLang's core innovations is the Radix Tree for KV caching. In mini-sglang, we see this implemented elegantly. Instead of a flat list, we store token sequences in a tree. If two requests share a system prompt, they share the same physical KV cache pages in GPU memory. This drastically reduces prefill time for multi-turn conversations."
+    },
+    {
+      "id": 4,
+      "title": "Paged Attention & Memory Management",
+      "bullets": [
+        "Traditional: Fixed-size contiguous buffers lead to 'internal fragmentation'",
+        "Paged: Allocate memory in small fixed-size blocks (Pages), similar to Virtual Memory in OS",
+        "Mapping: Page Table maps logical sequence position to physical GPU memory indices",
+        "Implementation: See python/minisgl/kvcache/naive_manager.py and attention/base.py"
+      ],
+      "speaker_notes": "To support thousands of concurrent requests, we can't allocate a max-length buffer for every user. We use Paged Attention. We break the KV cache into pages (e.g., 16 tokens). The Page Table tracks where each piece of a user's context lives on the GPU. This allows for zero memory waste and efficient sharing via the Radix Tree."
+    },
+    {
+      "id": 5,
+      "title": "Performance: Hiding Latency with Overlap Scheduling",
+      "bullets": [
+        "CPU Overhead: Tokenization, scheduling, and metadata preparation take time",
+        "Overlap Loop: Prepare the *next* batch while the GPU is still executing the *current* one",
+        "Implementation: Scheduler.overlap_loop in python/minisgl/scheduler/scheduler.py",
+        "Benefit: Keeps the GPU busy 100% of the time, even with high-frequency small batches"
+      ],
+      "code_snippet": "def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:\n    # 1. Process previous GPU results async\n    self._process_last_data(last_data, ongoing_data)\n    \n    # 2. Prepare next batch on CPU while GPU is busy\n    forward_input = self._schedule_next_batch()\n    \n    # 3. Launch next kernel non-blocking\n    ongoing_data = (forward_input, self._forward(forward_input))",
+      "speaker_notes": "In inference engines, the CPU often becomes the bottleneck (the 'Python Tax'). Overlap Scheduling is our solution. We use multiple CUDA streams to ensure that while the GPU is crunching numbers, the CPU is already figuring out what to do next. This is critical for achieving low latency in real-time applications."
+    },
+    {
+      "id": 6,
+      "title": "Eliminating Kernel Launch Overhead: CUDA Graphs",
+      "bullets": [
+        "Problem: Launching many small kernels (Attention, RMSNorm, Linear) incurs high CPU overhead",
+        "Solution: Capture the entire forward pass sequence into a single CUDA Graph",
+        "Optimization: Single launch command for the whole model; static memory addresses",
+        "Usage: GraphRunner in python/minisgl/engine/graph.py - specifically for Decode phase"
+      ],
+      "speaker_notes": "When generating tokens one by one (the Decode phase), the GPU work is very small. The time it takes for the CPU to tell the GPU to 'run this kernel' can be longer than the kernel itself! CUDA Graphs allow us to 'record' the model execution once and 'replay' it with new data, bypassing the launch overhead entirely."
+    },
+    {
+      "id": 7,
+      "title": "Model Architecture: Llama Implementation",
+      "bullets": [
+        "Modular Design: Layers defined in python/minisgl/layers/",
+        "TP Support: Linear layers (RowParallel/ColumnParallel) for multi-GPU scaling",
+        "Flexibility: Easy to add new models (see Llama and Qwen implementations)",
+        "Weight Loading: Efficient HF weight loading with support for dummy weights for testing"
+      ],
+      "code_snippet": "class LlamaModel(BaseModel):\n    def forward(self):\n        for layer in self.layers:\n            hidden_states = layer(hidden_states)\n        return self.norm(hidden_states)",
+      "speaker_notes": "The model implementation follows standard patterns but is optimized for inference. We use Tensor Parallelism (TP) to split the model across multiple GPUs. Notice how the forward pass is simplified to work seamlessly with the Engine's batching logic and the KV cache manager."
+    },
+    {
+      "id": 8,
+      "title": "Summary & Next Steps for AI Infra Engineers",
+      "bullets": [
+        "Key Takeaway 1: Memory (KV Cache) management is as important as compute",
+        "Key Takeaway 2: Systems tricks (CUDA Graphs, Overlap) are vital for performance",
+        "Key Takeaway 3: Understand the data flow from Tokenizer to Kernel",
+        "Exercise: Try running benchmark/online/bench_simple.py and trace a single request"
+      ],
+      "speaker_notes": "To wrap up: building AI infrastructure is about managing resources efficiently. mini-sglang shows you the 'guts' of how tokens are managed, how memory is paged, and how the hardware is kept saturated. I encourage you to look at the benchmark scripts and use a profiler like NSight Systems to see these concepts in action."
+    }
+  ]
+}

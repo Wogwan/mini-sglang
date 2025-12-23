@@ -1,0 +1,97 @@
+{
+  "slides": [
+    {
+      "id": 1,
+      "title": "深入剖析 mini-sglang: 构建高性能推理引擎",
+      "subtitle": "通过极简且优化的实现理解 AI 基础设施",
+      "bullets": [
+        "核心目标：通过研究精简、高性能的代码库学习 LLM 推理引擎",
+        "技术栈：PyTorch + 自定义 CUDA Kernel + Radix KV Cache 管理器",
+        "关键特性：Paged Attention, CUDA Graphs, Overlap Scheduling, Tensor Parallelism",
+        "核心哲学：系统工程与深度学习的结合——通过内存和计算优化实现极致效率"
+      ],
+      "speaker_notes": "欢迎参加本次关于 mini-sglang 的深度分享。虽然像 vLLM 或完整版 SGLang 这样的生产级引擎功能强大，但其数千个文件的规模往往让人望而生畏。mini-sglang 提供了一个‘蒸馏’后的版本。我们将探索现代推理引擎如何处理 KV cache、管理 GPU 内存，以及如何通过巧妙的调度来隐藏延迟。"
+    },
+    {
+      "id": 2,
+      "title": "系统架构：调度器 (Scheduler) vs. 引擎 (Engine)",
+      "bullets": [
+        "调度器 (控制面)：处理 API 请求、分词、批处理策略和前缀匹配",
+        "引擎 (数据面)：管理模型权重、KV cache 分配和 GPU 执行 (Forward Pass)",
+        "关注点分离：将复杂的请求管理与高频的 GPU 执行循环解耦",
+        "异步通信：前端与后端之间的异步消息传递，最大化吞吐量"
+      ],
+      "speaker_notes": "架构分为两个主要层级。调度器（位于 python/minisgl/scheduler/scheduler.py）相当于‘大脑’，负责决定下一步运行哪些请求。引擎（python/minisgl/engine/engine.py）则是‘肌肉’，拥有 GPU 内存并负责运行模型。这种分离允许我们对每一层进行独立优化。",
+      "visual_hint": "架构图：[用户请求] -> [调度器 (Prefill/Decode 管理器)] -> [引擎 (CUDA Graph/模型)] -> [GPU]"
+    },
+    {
+      "id": 3,
+      "title": "前缀缓存的奥秘：RadixTree",
+      "bullets": [
+        "问题：为共享的系统提示词或多轮对话重复计算 KV cache 是极大的浪费",
+        "解决方案：基于 RadixTree 的 KV Cache 管理器 (python/minisgl/kvcache/radix_manager.py)",
+        "机制：将 KV cache 以 Token 序列为索引存储在树状节点中",
+        "效率：自动前缀匹配 (O(match_len)) 和基于 LRU 的缓存淘汰策略"
+      ],
+      "code_snippet": "class RadixTreeNode:\n    def __init__(self, tic: int | None = None) -> None:\n        self.children: Dict[int, RadixTreeNode] = {}\n        self.ref_count: int = 0\n        self._key: torch.Tensor  # Token 序列\n        self._value: torch.Tensor # KV 物理索引",
+      "speaker_notes": "SGLang 的核心创新之一就是用于 KV 缓存的 Radix Tree。在 mini-sglang 中，我们可以看到其优雅的实现。通过树状结构，如果两个请求共享同一个系统提示词，它们会在 GPU 内存中共享相同的物理 KV cache 页，这极大减少了多轮对话的 Prefill 时间。"
+    },
+    {
+      "id": 4,
+      "title": "Paged Attention 与内存管理",
+      "bullets": [
+        "传统方式：固定大小的连续缓冲区会导致严重的“内部碎片”",
+        "分页方式：将内存划分为固定大小的块 (Pages)，类似于操作系统中的虚拟内存",
+        "映射机制：Page Table 将逻辑序列位置映射到物理 GPU 内存索引",
+        "实现参考：python/minisgl/kvcache/naive_manager.py 和 attention/base.py"
+      ],
+      "speaker_notes": "为了支持数千个并发请求，我们不能为每个用户分配一个最大长度的连续缓冲区。我们使用了 Paged Attention。我们将 KV cache 拆分为页（例如 16 个 token 一页）。Page Table 记录了用户上下文的每一部分在 GPU 上的位置。这实现了零内存浪费，并支持 Radix Tree 的高效共享。"
+    },
+    {
+      "id": 5,
+      "title": "性能优化：通过重叠调度 (Overlap Scheduling) 隐藏延迟",
+      "bullets": [
+        "CPU 开销：分词、调度和元数据准备会消耗大量 CPU 时间",
+        "重叠循环：在 GPU 执行当前批次的同时，在 CPU 上准备下一个批次",
+        "实现：python/minisgl/scheduler/scheduler.py 中的 Scheduler.overlap_loop",
+        "收益：即使在处理高频小批次时，也能保持 GPU 100% 的利用率"
+      ],
+      "code_snippet": "def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:\n    # 1. 异步处理上一个 GPU 结果\n    self._process_last_data(last_data, ongoing_data)\n    \n    # 2. 在 GPU 忙碌时准备下一个批次\n    forward_input = self._schedule_next_batch()\n    \n    # 3. 发起下一次非阻塞内核调用\n    ongoing_data = (forward_input, self._forward(forward_input))",
+      "speaker_notes": "在推理引擎中，CPU 往往成为瓶颈（所谓的 Python 税）。Overlap Scheduling 是我们的解决方案。通过多个 CUDA 流，我们确保当 GPU 在进行数值计算时，CPU 已经在计算下一步该做什么。这对于在实时应用中实现低延迟至关重要。"
+    },
+    {
+      "id": 6,
+      "title": "消除内核启动开销：CUDA Graphs",
+      "bullets": [
+        "问题：启动许多小内核 (Attention, RMSNorm, Linear) 会产生极高的 CPU 调度开销",
+        "解决方案：将整个 forward pass 序列录制为一个单一的 CUDA Graph",
+        "优化：通过一次启动命令执行整个模型；使用静态内存地址",
+        "应用场景：python/minisgl/engine/graph.py 中的 GraphRunner（专用于 Decode 阶段）"
+      ],
+      "speaker_notes": "当逐个生成 token（Decode 阶段）时，GPU 的工作量其实很小。CPU 告诉 GPU‘运行这个内核’的时间甚至可能比内核运行本身还要长。CUDA Graphs 允许我们‘录制’一次模型执行，然后通过新数据‘回放’，从而绕过了 CPU 的启动开销。"
+    },
+    {
+      "id": 7,
+      "title": "模型架构：Llama 实现",
+      "bullets": [
+        "模块化设计：在 python/minisgl/layers/ 中定义各个层",
+        "TP 支持：支持并行线性层 (RowParallel/ColumnParallel) 以实现多卡扩展",
+        "灵活性：易于添加新模型（参考 Llama 和 Qwen 的实现）",
+        "权重加载：高效的 HF 权重加载，支持测试用的 Dummy 权重"
+      ],
+      "code_snippet": "class LlamaModel(BaseModel):\n    def forward(self):\n        for layer in self.layers:\n            hidden_states = layer(hidden_states)\n        return self.norm(hidden_states)",
+      "speaker_notes": "模型实现遵循标准模式，但针对推理进行了优化。我们使用张量并行 (TP) 将模型拆分到多个 GPU 上。注意 forward pass 是如何被简化的，以便与引擎的批处理逻辑和 KV cache 管理器无缝配合。"
+    },
+    {
+      "id": 8,
+      "title": "总结：AI Infra 工程师的进阶之路",
+      "bullets": [
+        "核心要点 1：内存 (KV Cache) 管理与计算同样重要",
+        "核心要点 2：系统优化技巧 (CUDA Graphs, Overlap) 是性能的关键",
+        "核心要点 3：理解从 Tokenizer 到 Kernel 的全链路数据流",
+        "动手实践：尝试运行 benchmark/online/bench_simple.py 并追踪一个请求"
+      ],
+      "speaker_notes": "总结一下：构建 AI 基础设施的核心在于高效管理资源。mini-sglang 展示了 token 如何被管理、内存如何被分页、以及如何通过系统手段填满硬件算力。我鼓励大家查看 benchmark 脚本，并使用 Nsight Systems 等分析工具观察这些概念在实际运行中的表现。"
+    }
+  ]
+}
