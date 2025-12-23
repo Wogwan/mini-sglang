@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Dive into mini-sglang</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;700&family=Azeret+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        /* 1. CORE SETUP */
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 0; background-color: #111; display: flex; flex-direction: column; align-items: center; gap: 40px; }
+        
+        .slide-container {
+            width: 1280px;
+            height: 720px;
+            background-color: #050505;
+            color: #fff;
+            font-family: 'Urbanist', sans-serif;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding: 60px;
+        }
+
+        /* Background Decorative Elements */
+        .slide-container::before {
+            content: '';
+            position: absolute;
+            top: -10%;
+            right: -10%;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, rgba(222, 255, 154, 0.05) 0%, transparent 70%);
+            z-index: 0;
+        }
+
+        .slide-container::after {
+            content: '';
+            position: absolute;
+            bottom: 40px;
+            left: 60px;
+            right: 60px;
+            height: 1px;
+            background: linear-gradient(90deg, #deff9a 0%, rgba(222, 255, 154, 0.1) 100%);
+            z-index: 0;
+        }
+
+        .slide-container > * { position: relative; z-index: 1; }
+
+        /* TYPOGRAPHY */
+        h1, h2, h3 { margin: 0; font-weight: 700; }
+        h1 { font-size: 72px; line-height: 1.1; color: #fff; }
+        h1 span { color: #deff9a; }
+        
+        .slide-title { font-size: 52px; margin-bottom: 40px; color: #fff; text-align: left; width: 100%; border-left: 6px solid #deff9a; padding-left: 25px; }
+        .slide-title span { color: #deff9a; }
+
+        p, li { font-size: 22px; line-height: 1.5; color: #ccc; }
+        .subtitle { font-size: 28px; color: #deff9a; margin-top: 20px; font-weight: 500; }
+
+        .content-area { flex-grow: 1; display: flex; flex-direction: column; justify-content: center; width: 100%; }
+
+        /* LAYOUTS */
+        .title-layout { text-align: center; justify-content: center; height: 100%; display: flex; flex-direction: column; align-items: center; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; width: 100%; align-items: start; }
+        .two-column.tiled > div { background: #111; border: 1px solid #333; border-radius: 20px; padding: 40px; }
+        .two-column.tiled h3 { color: #deff9a; font-size: 32px; margin-bottom: 20px; }
+
+        /* ARCHITECTURE DIAGRAM (CSS-BASED) */
+        .arch-diagram {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 40px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 24px;
+            border: 1px dashed #444;
+        }
+        .node {
+            width: 320px;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            font-weight: 700;
+            font-size: 20px;
+            border: 1px solid #deff9a;
+            background: #000;
+        }
+        .node span { display: block; font-size: 14px; font-weight: 400; color: #aaa; margin-top: 5px; }
+        .arrow { font-size: 24px; color: #deff9a; }
+        .split-row { display: flex; gap: 40px; }
+        .node.control { border-color: #deff9a; color: #deff9a; }
+        .node.data { border-color: #4da6ff; color: #4da6ff; }
+        .node.hardware { border-color: #ff4d4d; color: #ff4d4d; }
+
+        /* BULLET STYLES */
+        .bullet-list { list-style: none; padding: 0; }
+        .bullet-list li { position: relative; padding-left: 40px; margin-bottom: 25px; }
+        .bullet-list i { position: absolute; left: 0; top: 8px; color: #deff9a; font-size: 20px; }
+
+        /* TABLE */
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th { text-align: left; padding: 20px; background: #111; color: #deff9a; border-bottom: 2px solid #333; }
+        td { padding: 20px; border-bottom: 1px solid #222; color: #ccc; }
+
+        /* FULL BG */
+        .full-bg-image { background-size: cover; background-position: center; }
+        .bg-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(to right, rgba(0,0,0,0.9) 30%, rgba(0,0,0,0.2) 100%); z-index: 0; }
+        
+        .tiled-content { display: flex; gap: 30px; width: 100%; }
+        .tile { flex: 1; background: #111; border: 1px solid #333; border-radius: 24px; padding: 30px; position: relative; }
+        .tile .icon { font-size: 40px; color: #deff9a; margin-bottom: 20px; }
+        .tile h3 { font-size: 28px; margin-bottom: 15px; color: #fff; }
+    </style>
+</head>
+<body>
+
+<!-- Slide 1: Title_Slide -->
+<div class="slide-container full-bg-image" id="slide1" style="background-image: url('http://googleusercontent.com/image_collection/image_retrieval/10506039310618441121');">
+    <div class="bg-overlay"></div>
+    <div class="title-layout">
+        <h1>Deep Dive into <span>mini-sglang</span></h1>
+        <p class="subtitle">Building a High-Performance Inference Engine from Scratch</p>
+        <p style="margin-top: 50px; font-family: 'Azeret Mono', monospace; font-size: 18px; color: #deff9a;">Optimized Implementation • AI Infrastructure • Custom CUDA Kernels</p>
+    </div>
+</div>
+
+<!-- Slide 2: Introduction -->
+<div class="slide-container" id="slide2">
+    <h2 class="slide-title">System <span>Philosophy</span></h2>
+    <div class="content-area">
+        <div class="two-column tiled">
+            <div>
+                <h3>Core Objective</h3>
+                <p>Learn LLM Inference Engines by studying a compact, performant codebase. Distilling thousands of files into a manageable, optimized core.</p>
+            </div>
+            <div>
+                <h3>System Synergy</h3>
+                <p>Where systems engineering meets Deep Learning. Efficiency achieved through extreme memory and compute optimization using custom kernels.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 4: System Architecture (Simplified Diagram) -->
+<div class="slide-container" id="slide4">
+    <h2 class="slide-title">System <span>Architecture</span></h2>
+    <div class="content-area">
+        <div class="two-column" style="grid-template-columns: 1fr 1.2fr; align-items: center;">
+            <div class="arch-diagram">
+                <div class="node">User Request<span>API / HTTP</span></div>
+                <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+                <div class="node control">Scheduler (Control Plane)<span>Tokenization, Batching, Prefix Match</span></div>
+                <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+                <div class="node data">Engine (Data Plane)<span>Forward Pass, KV Cache, Weights</span></div>
+                <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+                <div class="node hardware">GPU (CUDA)<span>Paged Attention, CUDA Graphs</span></div>
+            </div>
+            <div style="padding-left: 20px;">
+                <ul class="bullet-list">
+                    <li><i class="fa-solid fa-brain"></i> <strong>Scheduler:</strong> Decides "what" to run. Manages the high-level logic and request queue.</li>
+                    <li><i class="fa-solid fa-bolt"></i> <strong>Engine:</strong> Handles the "how." Owns GPU memory and actual model execution.</li>
+                    <li><i class="fa-solid fa-arrows-left-right"></i> <strong>Separation:</strong> Decoupling management from execution to maximize GPU occupancy.</li>
+                    <li><i class="fa-solid fa-clock"></i> <strong>Async Flow:</strong> Frontend prepares next batch while Backend processes current one.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 5: RadixTree -->
+<div class="slide-container" id="slide5">
+    <h2 class="slide-title">The Magic of <span>RadixTree</span></h2>
+    <div class="content-area">
+        <div class="two-column">
+            <div>
+                <p>Re-computing KV caches for shared prompts is wasteful. mini-sglang solves this with a RadixTree-based manager.</p>
+                <ul class="bullet-list" style="margin-top: 30px;">
+                    <li><i class="fa-solid fa-circle-check"></i> Automatic O(match_len) matching.</li>
+                    <li><i class="fa-solid fa-circle-check"></i> LRU-based cache eviction policy.</li>
+                </ul>
+                <div style="background: #111; padding: 20px; border-radius: 12px; border: 1px solid #333; margin-top: 20px;">
+                    <code style="font-family: 'Azeret Mono', monospace; font-size: 14px; color: #deff9a;">
+                        class RadixTreeNode:<br>
+                        &nbsp;&nbsp;def __init__(self):<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;self.children = {}<br>
+                        &nbsp;&nbsp;&nbsp;&nbsp;self.ref_count = 0
+                    </code>
+                </div>
+            </div>
+            <div style="background: #111; border-radius: 20px; border: 1px solid #333; padding: 40px; display: flex; align-items: center; justify-content: center;">
+                 <div style="text-align: center; color: #deff9a;">
+                    <i class="fa-solid fa-tree" style="font-size: 120px; margin-bottom: 20px;"></i>
+                    <p style="color: #fff;">Shared Prefixes = Shared GPU Memory</p>
+                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Slide 10: Performance Comparisons -->
+<div class="slide-container" id="slide10">
+    <h2 class="slide-title">Benchmarking <span>Performance</span></h2>
+    <div class="content-area">
+        <table>
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th>Standard Inference</th>
+                    <th>mini-sglang (Optimized)</th>
+                    <th>Gain</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Prefill Latency</td>
+                    <td>~120ms</td>
+                    <td>~5ms (Cache Hit)</td>
+                    <td>24.0x</td>
+                </tr>
+                <tr>
+                    <td>Launch Overhead</td>
+                    <td>High (Serial)</td>
+                    <td>Near-Zero (Graphs)</td>
+                    <td>Significant</td>
+                </tr>
+                <tr>
+                    <td>Memory Waste</td>
+                    <td>~15-20%</td>
+                    <td>&lt; 1% (Paged)</td>
+                    <td>Maximized</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Slide 11: Summary -->
+<div class="slide-container" id="slide11">
+    <h2 class="slide-title">Engine <span>Takeaways</span></h2>
+    <div class="content-area">
+        <ul class="bullet-list">
+            <li><i class="fa-solid fa-star"></i> <strong>Memory is King:</strong> KV Cache management is as vital as compute.</li>
+            <li><i class="fa-solid fa-star"></i> <strong>Systems Tricks:</strong> Overlap and Graphs hide the "Python Tax."</li>
+            <li><i class="fa-solid fa-star"></i> <strong>Trace the Flow:</strong> Success is understanding Tokenizer → Kernel.</li>
+        </ul>
+    </div>
+</div>
+
+</body>
+</html>
